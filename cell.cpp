@@ -3,6 +3,8 @@
 #include "resourcemanager.h"
 #include "world.h"
 #include <QDebug>
+#include "hunter.h"
+#include "wolf.h"
 
 // cell size in pixels when rendered
 const int cellSize = 100;
@@ -17,7 +19,24 @@ Cell::Cell(World *parent)
       parent(parent),
       sun(minWeather), rain(minWeather), grass(minGrass)
 {
-    rabbits.reserve(maxRabbitCount);
+    for (int crtype = 0; crtype < NO_OF_CREATURE_TYPES; crtype++)
+    {
+        creatures[crtype].reserve(maxRabbitCount);
+    }
+}
+
+void Cell::drawCreature(QPainter &painter, int count, int verticalPosition, const QImage &icon)
+{
+    if (count >= 1)
+    {
+        painter.drawImage(QPoint(2, verticalPosition), icon);
+    }
+    if (count >= 2) {
+        painter.drawImage(QPoint(34, verticalPosition), icon);
+    }
+    if (count >= 3) {
+        painter.drawImage(QPoint(66, verticalPosition), icon);
+    }
 }
 
 void Cell::renderAt(QPainter &painter, QPoint pos) const
@@ -25,6 +44,7 @@ void Cell::renderAt(QPainter &painter, QPoint pos) const
     painter.save();
     painter.translate(pos * cellSize);
 
+    // terrain texture
     QImage texure;
     switch (terrain)
     {
@@ -40,22 +60,17 @@ void Cell::renderAt(QPainter &painter, QPoint pos) const
     }
     painter.drawImage(QRect(0, 0, cellSize, cellSize), texure);
 
+    // creatures
+    drawCreature(painter, getRabbitCount(), 68, ResourceManager::instance()->rabbitIcon());
+    drawCreature(painter, getCreatureCount(CREATURE_TYPE_HUNTER), 35, ResourceManager::instance()->hunterIcon());
+    drawCreature(painter, getCreatureCount(CREATURE_TYPE_WOLF), 3, ResourceManager::instance()->wolfIcon());
+
+    // weather icons
     painter.drawImage(QPoint(11, 1), ResourceManager::instance()->sunIcon());
     painter.drawImage(QPoint(36, 1), ResourceManager::instance()->rainIcon());
     painter.drawImage(QPoint(63, 1), ResourceManager::instance()->grassIcon());
 
-    const int rc = getRabbitCount();
-    if (rc >= 1)
-    {
-        painter.drawImage(QPoint(2, 60), ResourceManager::instance()->rabbitIcon());
-    }
-    if (rc >= 2) {
-        painter.drawImage(QPoint(34, 60), ResourceManager::instance()->rabbitIcon());
-    }
-    if (rc >= 3) {
-        painter.drawImage(QPoint(66, 60), ResourceManager::instance()->rabbitIcon());
-    }
-
+    // weather values
     painter.setPen(Qt::white);
     painter.drawText(QPoint(26, 13), QString::number(sun));
     painter.drawText(QPoint(52, 13), QString::number(rain));
@@ -159,9 +174,20 @@ void Cell::advance(int tickNumber)
     setRandomWeather();
     processGrass();
 
-    for (int i = 0; i < getRabbitCount(); i++)
+    for (int crtype = 0; crtype < NO_OF_CREATURE_TYPES; crtype++)
     {
-        rabbits[i].advance(tickNumber);
+        int lastSize = creatures[crtype].size();
+        for (int i = 0; i < lastSize; i++)
+        {
+            creatures[crtype][i]->advance(tickNumber);
+
+            if (creatures[crtype].size() < lastSize)
+            {
+                // one of creatures died
+                lastSize = creatures[crtype].size();
+                i--;
+            }
+        }
     }
 }
 
@@ -229,42 +255,64 @@ bool Cell::decreaseGrass()
     }
 }
 
-bool Cell::rabbitCanMoveHere() const
+bool Cell::addCreature(Creature *newCreature)
 {
-    return (getRabbitCount() < maxRabbitCount) && (getGrassLevel() > minGrass);
-}
-
-bool Cell::addRabbit(const Rabbit &newRabbit)
-{
-    if (getRabbitCount() < maxRabbitCount)
+    if (getCreatureCount(newCreature->getType()) < maxRabbitCount)
     {
-        rabbits.append(newRabbit);
-        //qDebug() << "setting parent for rabbit" << rabbits[rabbits.size() - 1].getId();
-        rabbits[rabbits.size() - 1].setParent(this);
-        //qDebug() << "added rabbit" << newRabbit.getId() << "to cell" << getPosition();
+        newCreature->setParent(this);
+        creatures[newCreature->getType()].append(newCreature);
         return true;
     } else {
+        qWarning() << "add creature failed due to space constraints";
         return false;
     }
 }
 
 int Cell::getRabbitCount() const
 {
-    return rabbits.size();
+    return getCreatureCount(CREATURE_TYPE_RABBIT);
 }
 
-bool Cell::removeRabbit(int id)
+int Cell::getCreatureCount(int creatureType) const
 {
-    for (int i = 0; i < getRabbitCount(); i++)
+    return creatures[creatureType].size();
+}
+
+bool Cell::disownCreature(Creature *creature)
+{
+    const int cr_id = creature->getId(), cr_type = creature->getType();
+
+    for (int i = 0; i < creatures[cr_type].size(); i++)
     {
-        if (rabbits[i].getId() == id)
+        if (creatures[cr_type][i]->getId() == cr_id)
         {
-            rabbits.remove(i);
-            //qDebug() << "rabbit with id" << id << "removed from cell" << getPosition();
+            creatures[cr_type].remove(i);
+            creature->setParent(nullptr);
             return true;
         }
     }
 
-    qWarning() << "failed to remove - no rabbit with id" << id;
+    qWarning() << "failed to remove - no creature with id" << cr_id;
     return false;
+}
+
+bool Cell::killCreature(Creature *creature)
+{
+    if (disownCreature(creature))
+    {
+        delete creature;
+        return true;
+    } else {
+        return false;
+    }
+}
+
+Creature *Cell::getCreature(int type, int index) const
+{
+    if (type < NO_OF_CREATURE_TYPES && index < creatures[type].size())
+    {
+        return creatures[type][index];
+    } else {
+        return nullptr;
+    }
 }

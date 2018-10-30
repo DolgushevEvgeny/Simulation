@@ -6,22 +6,33 @@
 #include <QWheelEvent>
 #include <QMessageBox>
 #include <QRandomGenerator>
+#include "hunter.h"
+#include "wolf.h"
+#include "populationgraph.h"
 
 const double zoomScaleFactor = 1.5;
 const QSize worldSize(3, 3); // default world size
+
+const QColor selectedCellBorderColor = QColor(46, 215, 244);
+const qreal selectedCellBorderWidth = 3.5;
 
 MainWindow::MainWindow(QWidget *parent) :
     QMainWindow(parent),
     ui(new Ui::MainWindow),
     zoomLevel(1.0),
     isPanning(false),
-    world(worldSize)
+    world(worldSize),
+    watchedCell(nullptr)
 {
     ui->setupUi(this);
     qApp->installEventFilter(this);
 
     ui->spnWidth->setValue(world.getSize().width());
     ui->spnHeight->setValue(world.getSize().height());
+
+    // show population graph window
+    graphWindow = new PopulationGraph();
+    graphWindow->show();
 
     // render world
     redrawWorld();
@@ -44,8 +55,18 @@ void MainWindow::resizeEvent(QResizeEvent* event)
     redrawWorld();
 }
 
+// ignore "unused parameter ‘...’" warning
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    graphWindow->close();
+}
+
 void MainWindow::redrawWorld()
 {
+    // render world
+
     const QSize renderAreaSize = ui->lblDrawArea->size();
     if (renderBuffer.size() != renderAreaSize)
     {
@@ -65,21 +86,24 @@ void MainWindow::redrawWorld()
 
     world.render(painter);
 
-    ui->lblDrawArea->setPixmap(renderBuffer);
-
-    //
-
-    int rabbitPopulation = 0;
-    for (int x = 0; x < world.getSize().width(); x++)
+    // mark selected (watched) cell
+    if (watchedCell != nullptr)
     {
-        for (int y = 0 ; y < world.getSize().height(); y++)
-        {
-            rabbitPopulation += world.cellAt(x, y)->getRabbitCount();
-        }
+        const QPoint pos = watchedCell->getPosition() * 100;
+
+        painter.setPen(QPen(QBrush(selectedCellBorderColor), selectedCellBorderWidth, Qt::PenStyle::DashLine));
+        painter.drawRect(pos.x(), pos.y(), 100, 100);
     }
 
-    ui->lblGlobalStats->setText(QString("%1 rabbits in total").arg(rabbitPopulation));
+    ui->lblDrawArea->setPixmap(renderBuffer);
+
+    // update info on selected cell
+
+    updateWatchedCell();
 }
+
+// ignore "enumeration value '...' not handled in switch' warning
+#pragma GCC diagnostic ignored "-Wswitch"
 
 bool MainWindow::eventFilter(QObject *obj, QEvent *event)
 {
@@ -125,7 +149,7 @@ void MainWindow::on_lblDrawArea_wheel(QWheelEvent *event)
 
 void MainWindow::on_lblDrawArea_mouseMove(QMouseEvent *event)
 {
-    QPoint mousePosition = event->pos();
+    const QPoint mousePosition = event->pos();
 
     if (isPanning)
     {
@@ -141,20 +165,24 @@ void MainWindow::on_lblDrawArea_mouseMove(QMouseEvent *event)
 
             lastPanDelta = panDelta;
         }
+    }
+}
+
+void MainWindow::updateWatchedCell()
+{
+    if (watchedCell == nullptr)
+    {
+        ui->lblTileInfo->setText("Selected tile: None");
     } else {
-        Cell *selectedCell = getCellFromFromPoint(mousePosition);
-        if (selectedCell == nullptr)
-        {
-            ui->lblTileInfo->setText("Selected tile: None");
-        } else {
-            const static char* terrainNames[] = { "Grass", "Water", "Mountain" };
-            ui->lblTileInfo->setText(QString("Selected tile: %1x%2\nTerrain: %3\nSun: %4; Rain: %5\nGrass: %6\nRabbits: %7").
-                    arg(selectedCell->getPosition().x() + 1).arg(selectedCell->getPosition().y() + 1).
-                    arg(terrainNames[selectedCell->getTerrain()], QString::number(selectedCell->getSunLevel()),
-                                     QString::number(selectedCell->getRainLevel()),
-                                     QString::number(selectedCell->getGrassLevel()),
-                                     QString::number(selectedCell->getRabbitCount())));
-        }
+        const static char* terrainNames[] = { "Grass", "Water", "Mountain" };
+        ui->lblTileInfo->setText(QString("Selected tile: %1x%2\nTerrain: %3\nSun: %4; Rain: %5\nGrass: %6\nRabbits: %7\nHunters: %8\nWolves: %9").
+                arg(watchedCell->getPosition().x() + 1).arg(watchedCell->getPosition().y() + 1).
+                arg(terrainNames[watchedCell->getTerrain()], QString::number(watchedCell->getSunLevel()),
+                                 QString::number(watchedCell->getRainLevel()),
+                                 QString::number(watchedCell->getGrassLevel()),
+                                 QString::number(watchedCell->getRabbitCount()),
+                                 QString::number(watchedCell->getCreatureCount(CREATURE_TYPE_HUNTER))).
+                arg(watchedCell->getCreatureCount(CREATURE_TYPE_WOLF)));
     }
 }
 
@@ -181,13 +209,18 @@ Cell *MainWindow::getCellFromFromPoint(QPoint point)
 
 void MainWindow::on_lblDrawArea_mouseButtonPress(QMouseEvent *event)
 {
+    const QPoint mousePosition = event->pos();
+
     if (event->button() == Qt::LeftButton)
     {
         ui->lblDrawArea->setCursor(Qt::ClosedHandCursor);
 
-        panStartingPoint = event->pos();
+        panStartingPoint = mousePosition;
         translOnPanStart = translPoint;
         isPanning = true;
+    } else if (event->button() == Qt::RightButton) {
+        watchedCell = getCellFromFromPoint(mousePosition);
+        redrawWorld();
     }
 }
 
@@ -202,9 +235,14 @@ void MainWindow::on_lblDrawArea_mouseButtonRelease(QMouseEvent *event)
 
 void MainWindow::on_btnTick_clicked()
 {
-    for (int i = 0; i < ui->spnTickCount->value(); i++)
+    const int tickCount = ui->spnTickCount->value();
+    for (int i = 0; i < tickCount; i++)
     {
         world.advance();
+        graphWindow->RegisterStats(world.getCreaturePopulation(CREATURE_TYPE_RABBIT),
+                                   world.getCreaturePopulation(CREATURE_TYPE_HUNTER),
+                                   world.getCreaturePopulation(CREATURE_TYPE_WOLF),
+                                   i == tickCount - 1);
     }
 
     redrawWorld();
@@ -214,12 +252,13 @@ void MainWindow::on_btnResize_clicked()
 {
     world.resize(QSize(ui->spnWidth->value(), ui->spnHeight->value()));
     redrawWorld();
+    graphWindow->ResetStats();
 }
 
-void MainWindow::on_btnAddRabbits_clicked()
+void MainWindow::addCreatures(int creatureType, int count)
 {
     const int world_w = world.getSize().width(), world_h = world.getSize().height();
-    int maxNumberOfRabbitsToAdd = 0;
+    int maxNumberOfCreaturesToAdd = 0;
 
     for (int x = 0; x < world_w; x++)
     {
@@ -228,24 +267,24 @@ void MainWindow::on_btnAddRabbits_clicked()
             Cell *cell = world.cellAt(x, y);
             if (cell->getTerrain() == Cell::Terrain::Grass)
             {
-                maxNumberOfRabbitsToAdd += 3 - cell->getRabbitCount();
+                maxNumberOfCreaturesToAdd += 3 - cell->getCreatureCount(creatureType);
             }
         }
     }
 
-    //qDebug() << "can add up to" << maxNumberOfRabbitsToAdd << "rabbits";
+    //
 
-    int numOfRabbitsToAdd = ui->spnRabbitCount->value();
-
-    if (numOfRabbitsToAdd > maxNumberOfRabbitsToAdd)
+    if (count > maxNumberOfCreaturesToAdd)
     {
         QMessageBox msgbox;
-        msgbox.setText(QString("%1 out of %2 rabbits will be added due to space limitations").arg(maxNumberOfRabbitsToAdd).arg(numOfRabbitsToAdd));
+        msgbox.setText(QString("%1 out of %2 creatures will be added due to space limitations").arg(maxNumberOfCreaturesToAdd).arg(count));
         msgbox.setIcon(QMessageBox::Warning);
         msgbox.exec();
 
-        numOfRabbitsToAdd = maxNumberOfRabbitsToAdd;
+        count = maxNumberOfCreaturesToAdd;
     }
+
+    //
 
     QRandomGenerator *random = QRandomGenerator::global();
     do {
@@ -253,12 +292,47 @@ void MainWindow::on_btnAddRabbits_clicked()
         Cell *cell = world.cellAt(xpos, ypos);
         if (cell->getTerrain() == Cell::Terrain::Grass)
         {
-            if (cell->addRabbit(Rabbit()))
+            if (cell->getCreatureCount(creatureType) < 3)
             {
-                numOfRabbitsToAdd--;
+                Creature *newCreature;
+
+                switch (creatureType)
+                {
+                case CREATURE_TYPE_RABBIT:
+                    newCreature = new Rabbit();
+                    break;
+                case CREATURE_TYPE_HUNTER:
+                    newCreature = new Hunter();
+                    break;
+                case CREATURE_TYPE_WOLF:
+                    newCreature = new Wolf();
+                    break;
+                default:
+                    abort();
+                }
+
+                assert(cell->addCreature(newCreature));
+                count--;
             }
         }
-    } while (numOfRabbitsToAdd > 0);
+    } while (count > 0);
+
+    //
 
     redrawWorld();
+}
+
+void MainWindow::on_btnAddRabbits_clicked()
+{
+    addCreatures(CREATURE_TYPE_RABBIT, ui->spnRabbitCount->value());
+}
+
+void MainWindow::on_btnAddHunters_clicked()
+{
+    addCreatures(CREATURE_TYPE_HUNTER, ui->spnHunterCount->value());
+}
+
+void MainWindow::on_btnAddWolves_clicked()
+{
+    addCreatures(CREATURE_TYPE_WOLF, ui->spnWolfCount->value());
 }
